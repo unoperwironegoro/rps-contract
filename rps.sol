@@ -1,11 +1,12 @@
-pragma solidity ^0.4.24;
+pragma solidity ^0.5.0;
 
 contract RockPaperScissors {
+    uint wager = 10 ether;        // The cost of playing the game
+    
     State state = State.Playing;
-    uint wager = 10;
 
     mapping(address => Player) players;
-    address[] player_addrs;
+    address payable[] player_addrs;
 
 
     uint256 timeout_duration = 10;
@@ -17,8 +18,8 @@ contract RockPaperScissors {
     struct Player {
         bool isPlaying;      // If the player is in the game
         bool awaiting;       // If the player is next to make a move
-        bytes32 hashed_move; // The player's hashed move: (password:move)
-        Move move;            // The player's move
+        bytes32 hashed_move; // The player's hashed move: (password + move)
+        Move move;           // The player's move
     }
 
     enum Move {
@@ -55,10 +56,8 @@ contract RockPaperScissors {
         _;
     }
 
-    modifier hashIsConsistent(string password, Move move) {
-        require(
-            players[msg.sender].hashed_move ==
-            keccak256(abi.encodePacked(password, move)));
+    modifier hashIsConsistent(string memory password, string memory sMove) {
+        require(players[msg.sender].hashed_move == hash(password, sMove));
         _;
     }
 
@@ -86,7 +85,16 @@ contract RockPaperScissors {
         _;
     }
 
-    // ------------------------- State Transitions -----------------------
+    // --------------------------- View State ------------------------------
+    function viewState() public view returns (State) {
+        return state;
+    }
+    
+    function viewPlayerCount() public view returns (uint) {
+        return player_addrs.length;
+    }
+
+    // ------------------------- State Transitions -------------------------
 
     /** A player makes a move by hashing a password and the move. */
     function play(bytes32 hashed_move) public payable
@@ -104,33 +112,39 @@ contract RockPaperScissors {
         // Both players have made their move
         if(player_addrs.length == 2) {
             state = State.Revealing;
-            players[1].awaiting = true;
-            players[2].awaiting = true;
+            players[player_addrs[0]].awaiting = true;
+            players[player_addrs[1]].awaiting = true;
         }
     }
 
     /** A player reveals by giving the password and move for the hash */
-    function reveal(string password, Move move) public
-      inState(State.Revealing) isPlaying() hashIsConsistent(password, move)
+    function reveal(string memory password, string memory sMove) public
+      inState(State.Revealing) isPlaying() hashIsConsistent(password, sMove)
       hasNotRevealed() {
+        
+        Move move = stringToMove(sMove);
+        
+        // Invalid move was committed
+        require(move != Move.Unknown);
+          
         players[msg.sender].awaiting = false;
         players[msg.sender].move = move;
 
-        Move move1 = players[player_addrs[0]].move;
-        Move move2 = players[player_addrs[1]].move;
+        Move m1 = players[player_addrs[0]].move;
+        Move m2 = players[player_addrs[1]].move;
       
         // Awaiting the other players' move
-        if(move1 == Move.Unknown || move2 == Move.Unknown) {
+        if(m1 == Move.Unknown || m2 == Move.Unknown) {
             timeout = now + timeout_duration;
             return;
         } else {
             // Pay winnings
-            (uint p1w, uint p2w) = decideWinnings(move1, move2);
+            (uint p1w, uint p2w) = decideWinnings(m1, m2);
             player_addrs[0].transfer(p1w);
             player_addrs[1].transfer(p2w);
 
             // Reset the contract
-            selfdestruct(0);
+            reset();
         }
     }
 
@@ -139,38 +153,70 @@ contract RockPaperScissors {
     /** The victim of the timeout can claim the pot */
     function claimTimeout() public 
       isTimedOut() isPlaying() isNotAwaiting() {
-        selfdestruct(msg.sender);
+        if(address(this).balance > 0) {
+            msg.sender.transfer(address(this).balance);
+        }
+        reset();
     }
 
     /** Anyone can claim the wager of an abandoned game */
     function claimAbandonment() public 
       isAbandoned() {
-        selfdestruct(msg.sender);
+        if(address(this).balance > 0) {
+            msg.sender.transfer(address(this).balance);
+        }
+        reset();
     }
 
     // ------------------------- Auxiliary Functions -----------------------
 
+    /** Reset the contract to its initial state */
+    function reset() private {
+        for(uint i = 0; i < player_addrs.length; i++) {
+            delete players[player_addrs[i]];
+        }
+        player_addrs.length = 0;
+        
+        state = State.Playing;
+    }
+
     function decideWinnings(Move m1, Move m2) private view
       returns (uint, uint) {
         if(m1 == m2) {
-            return (wager/2, wager/2);
+            return (wager, wager);
         }
         
         if((m1 == Move.Rock && m2 == Move.Scissors) ||
            (m1 == Move.Paper && m2 == Move.Rock) ||
            (m1 == Move.Scissors && m2 == Move.Paper)) {
-            return (wager, 0);
+            return (2 * wager, 0);
         }
 
-        return (0, wager);
+        return (0, 2 * wager);
     }
 
-    function otherPlayerAddress() view private returns (address) {
-        if(player_addrs[0] == msg.sender) {
-            return player_addrs[1];
-        } else if(player_addrs[1] == msg.sender) {
-            return player_addrs[0];
+    function stringEquals(string memory s1, string memory s2) private pure
+      returns (bool) {
+        return keccak256(bytes(s1)) == keccak256(bytes(s2));
+    }
+
+    // -------------------- Public Auxiliary Functions ---------------------
+    
+    /** Allow for clients to verify their hash implementations */
+    function hash(string memory password, string memory sMove) public pure
+      returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes(password), sMove));
+    }
+    
+    /** Aid in reading logs */
+    function stringToMove(string memory sMove) public pure returns (Move) {
+        if(stringEquals(sMove, 'rock')) {
+            return Move.Rock;
+        } else if(stringEquals(sMove, 'paper')) {
+            return Move.Paper;
+        } else if(stringEquals(sMove, 'scissors')) {
+            return Move.Scissors;
         }
-        revert();
+        return Move.Unknown;
     }
 }
